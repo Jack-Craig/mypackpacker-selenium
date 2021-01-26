@@ -11,9 +11,6 @@ const ProductModel = mongoose.model('product', new mongoose.Schema({
         pictures: [String],
         description: String,
         unaffiliatedUrl: String,
-        hydrationCompatible: Boolean,
-        gender: String,
-        frameType: String,
         rating: {r: Number, n:Number},
         type: String,
     },
@@ -22,7 +19,7 @@ const ProductModel = mongoose.model('product', new mongoose.Schema({
         maxPrice: Number
     },
     userCreated: {$type: Boolean, default: false},
-    publicalyViewable: {$type: Boolean, default: false}
+    publicalyViewable: {$type: Boolean, default: true}
 }, {strict: false, typeKey: '$type'}))
 
 module.exports = ProductModel

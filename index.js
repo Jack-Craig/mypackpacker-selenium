@@ -1,18 +1,40 @@
-const { Builder, Key, By } = require('selenium-webdriver');
+//const { Builder, Key, By } = require('selenium-webdriver');
 const mongoose = require('mongoose')
 const ProductModel = require('./models/Product')
 const SourceModel = require('./models/source')
 const cheerio = require('cheerio');
 require('dotenv').config()
-const fs = require('fs')
-
-const parseBackpacks = require('./reiParsers/parseBackpacks')
-
+const fs = require('fs');
+const getTtext = require('./helpers/getTtext');
 
 const CAT2PRSR = { // Category Id to parser function
-    'backpacks': parseBackpacks
+    'backpacks': require('./reiParsers/parseBackpacks'),
+    'bathroom': require('./reiParsers/parseBathroom'),
+    'boots': require('./reiParsers/parseBoots'),
+    'bottoms': require('./reiParsers/parseBottoms'),
+    'custom': require('./reiParsers/parseCustom'),
+    'emergency-shelter': require('./reiParsers/parseEmergencyShelter'),
+    'fire-starter': require('./reiParsers/parseFireStarter'),
+    'first-aid': require('./reiParsers/parseFirstAid'),
+    'insulation-layers': require('./reiParsers/parseInsulationLayer'),
+    'knives': require('./reiParsers/parseKnives'),
+    'light': require('./reiParsers/parseLight'),
+    'mess-items': require('./reiParsers/parseMessItems'),
+    'navigation': require('./reiParsers/parseNavigation'),
+    'other': require('./reiParsers/parseOther'),
+    'pots-and-pans': require('./reiParsers/parsePotsAndPans'),
+    'sleeping-bags': require('./reiParsers/parseSleepingBags'),
+    'sleeping-pads': require('./reiParsers/parseSleepingPads'),
+    'socks': require('./reiParsers/parseSocks'),
+    'stoves': require('./reiParsers/parseStoves'),
+    'sun-protection': require('./reiParsers/parseSunProtection'),
+    'teeth': require('./reiParsers/parseTeeth'),
+    'tents': require('./reiParsers/parseTents'),
+    'tops': require('./reiParsers/parseTops'),
+    'water-treatment': require('./reiParsers/parseWaterTreatment'),
+    'rain-gear': require('./reiParsers/rainGear'),
+    'water-container': require('./reiParsers/waterContainer')
 }
-
 
 // REI SCRAPER
 let f_idx = 0
@@ -45,12 +67,14 @@ const UOM_TO_G = {
 
 const isUndefined = objDoc => {
     for (const key of Object.keys(objDoc)) {
-        if (objDoc[key] === undefined || objDoc[key] == -1 || Number.isNaN(objDoc[key]))
-            return true
-        if (typeof objDoc[key] === 'object')
+        if (typeof objDoc[key] === 'object') {
             if (isUndefined(objDoc[key])) {
                 return true
             }
+        } else {
+            if (objDoc[key] === undefined || objDoc[key] == -1 || Number.isNaN(objDoc[key]))
+                return true
+        }
     }
     return false
 }
@@ -96,13 +120,21 @@ const get1Detail = async (driver, cId, scId, testData=undefined) => {
         $ = cheerio.load(await driver.getPageSource())
     else
         $ = cheerio.load(testData)
-    const imgSrc = $('img.media-center-primary-image.hc').attr('src')
+
+    const imgSrc = $('img.media-center-primary-image').attr('src')
+    let cat = cId
     const dTable = $('table.product-specs-table')
+    if (cat === 'insulation-layers' && dTable.find(`th:contains("Waterproof")`).length > 0) {
+        cat = 'rain-gear'
+    }
+    if (cat === 'top')
+    cat = 'tops'
     const rElem = $('.product-rating-navigable a').first().children('span[aria-hidden="true"]').children(':first-child')
-    const productNumber = $('.item-number > span[data-ui="product-information-style"]').first().text().trim(),
+    const productNumber = $('.item-number > span[data-ui="product-information-style"]').first().text().trim()
+    const origPrice = $('span.product-price.product-standard-price')
     return {
         displayName: $('.product-title').text().trim().replace('  ', ' '),
-        categoryID: cId,
+        categoryID: cat,
         brand: $('.brand-link').text().trim(),
         sourceData: {
             rei: {
@@ -111,15 +143,15 @@ const get1Detail = async (driver, cId, scId, testData=undefined) => {
             }
         },
         productInfo: {
-            weight: normalizeWeightString($('table.product-specs-table th:contains("Weight")').next('.specs-value').text().trim()),
+            weight: cat==='socks'?85:cat==='rain-gear'?0:normalizeWeightString($('table.product-specs-table th:contains("Weight")').next('.specs-value').text().trim()),
             pictures: imgSrc ? ['http://rei.com' + imgSrc] : undefined,
             rating: {r: parseFloat(rElem.text()), n: parseFloat(rElem.next().text().replace('(','').replace(')',''))},
             description: $('ul.product-features-list').text().trim(),
             unaffiliatedUrl: driver ? await driver.getCurrentUrl() : `www.rei.com/product/${productNumber}`,
             type: scId,
-            ...CAT2PRSR[cId](dTable)
+            ...CAT2PRSR[cat](dTable)
         },
-        lowestPriceRange: splitPriceRange($('span.product-price.product-standard-price').text())
+        lowestPriceRange: origPrice.length ? splitPriceRange(origPrice.text()) : $('span.product-price.product-sale-price').text()
     }
 }
 
@@ -130,7 +162,7 @@ const save = (driver, sId, cId) => new Promise(async (res, rej) => {
     })
 })
 
-const getAllDetail = async (driver, subId, catId) => {
+const getAllDetail = async (driver, subId, catId) => { // TODO: Renovate to use files saved in downloads/
     let allData = []
     let curUrl = ''
     do {
@@ -192,27 +224,65 @@ const runREI = driver => new Promise(async (res, rej) => {
 
 // Loaded from prepared html JSON documents stored locally
 
-const getLocalDetail = (filePath) => new Promise((res, rej)=>{
-    fs.readFile(filePath, 'utf-8', (err, data) => {
+const getLocalDetail = (filePath, verbose=false) => new Promise(async (res, rej)=>{
+    fs.readFile(filePath, 'utf-8', async (err, data) => {
+        if (err) {
+            console.log('Resolving error')
+            return res({_id: 'error', eT: err})
+        }
         const jsData = JSON.parse(data)
         const cId = jsData.catId
         const scId = jsData.subCat
         const html = jsData.src
-
-        res()
+        let d = await get1Detail(false, cId, scId, html)
+        if (verbose) {console.log(d)}
+        fs.writeFileSync('./debugcache/t.html', html)
+        const url = d.sourceData.rei.url
+        if (isUndefined(d)) {
+            return res({_id: false, cId: d.categoryID, scId: scId, url:url})
+        }
+        await ProductModel.findOneAndUpdate({'sourceData.rei.id': d.sourceData.rei.id}, d, {upsert: true, setDefaultsOnInsert: true}).lean()
+        return res({_id: 'success', cId: d.categoryID})
     })
 })
 
 const runlocal = () => new Promise(async (res, rej) => {
+    await mongoose.connect(process.env.MONGO_URI)
     let i = 0
+    let totalSuccess = 0
+    let totalFailure = 0
+    let catFailure = {}
     while (1) {
-        const data = await getLocalDetail('src_'+1)
+        const data = await getLocalDetail(`./downloads/src_${++i}`)
+
         // TODO: Validation
         // TODO: IF FAIL, LOAD TO FILE?
         // TODO: Log failure rate
-        await ProductModel.findOneAndUpdate({'sourceData.rei.id':data.sourceData.rei.id}, data, {upsert: true}).lean()
+        if (data._id === 'error')
+            break
+        if (!catFailure.hasOwnProperty(data.cId))
+            catFailure[data.cId] = {success: 0, failure: 0}
+        if (!data._id) {
+            catFailure[data.cId]['failure']++
+            fs.appendFileSync('./logs/failedUrls', `./downloads/src_${i}\t${data.url}\t${data.cId}\t${data.scId}\n`) 
+            totalFailure++
+        }
+        else {
+            catFailure[data.cId]['success']++
+            totalSuccess++
+        }
     }
+    console.log(catFailure)
+    console.log(`Total Success: ${totalSuccess}`)
+    console.log(`Total Failure: ${totalFailure}`)
+    await mongoose.disconnect()
+    res()
 })
+
+if (process.argv.length > 2)
+    getLocalDetail(process.argv[2], verbose=true).then(r=>console.log(r))
+else
+    runlocal().then(()=>console.log('done'))
 
 const test = driver => new Promise(async (res, rej) => {
     let numInserted = 0
@@ -313,7 +383,7 @@ const testOffline = () => {
 }
 testOffline()
  */
-
+/*
 mongoose.connect(process.env.MONGO_URI).then(() => {
     new Builder().forBrowser('chrome').build().then(driver => {
         runlocal().finally(async ()=>{
@@ -328,3 +398,4 @@ mongoose.connect(process.env.MONGO_URI).then(() => {
     })
 })
  
+*/
